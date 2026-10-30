@@ -7,7 +7,7 @@ export function formatSearchResults(data, query, searchedAt) {
       position: item.position,
       title: item.title,
       url: item.link,
-      description: item.description || '',
+      description: item.snippet || item.description || '',
     })),
   };
 }
