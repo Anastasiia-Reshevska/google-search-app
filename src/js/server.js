@@ -4,8 +4,9 @@ import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { formatSearchResults } from './searchResults.js';
 
-const apiKey = process.env.SERPAPI_KEY;
 const isProduction = process.env.NODE_ENV === 'production';
+const limit = 10;
+const windowMs = 60_000;
 const distPath = resolve(fileURLToPath(new URL('../../dist/', import.meta.url)));
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -40,7 +41,9 @@ async function serveStatic(pathname, res) {
   }
 }
 
-createServer(async (req, res) => {
+export function createSearchHandler({ fetchResults = fetch, now = Date.now } = {}) {
+  const requests = new Map();
+  return async (req, res) => {
   const requestUrl = new URL(req.url, 'http://localhost');
 
   if (requestUrl.pathname !== '/api/search') {
@@ -65,11 +68,27 @@ createServer(async (req, res) => {
     res.end(JSON.stringify({ error: 'Enter a search phrase (up to 200 characters).' }));
     return;
   }
+  const apiKey = process.env.SERPAPI_KEY;
   if (!apiKey) {
     res.statusCode = 500;
     res.end(JSON.stringify({ error: 'Add SERPAPI_KEY to the .env file.' }));
     return;
   }
+
+  const currentTime = now();
+  const address = req.socket.remoteAddress || 'unknown';
+  for (const [ip, entry] of requests) {
+    if (currentTime - entry.startedAt >= windowMs) requests.delete(ip);
+  }
+  const entry = requests.get(address);
+  if (entry && entry.count >= limit) {
+    res.statusCode = 429;
+    res.setHeader('Retry-After', String(Math.ceil((windowMs - (currentTime - entry.startedAt)) / 1000)));
+    res.end(JSON.stringify({ error: 'Too many searches. Please try again later.' }));
+    return;
+  }
+  if (entry) entry.count += 1;
+  else requests.set(address, { count: 1, startedAt: currentTime });
 
   const params = new URLSearchParams({
     engine: 'google', q: query, hl: 'en', gl: 'us', start: '0',
@@ -77,7 +96,7 @@ createServer(async (req, res) => {
   });
 
   try {
-    const response = await fetch(`https://serpapi.com/search.json?${params}`, {
+    const response = await fetchResults(`https://serpapi.com/search.json?${params}`, {
       signal: AbortSignal.timeout(20000),
     });
     const data = await response.json();
@@ -92,6 +111,11 @@ createServer(async (req, res) => {
     res.statusCode = 502;
     res.end(JSON.stringify({ error: 'Could not fetch results from SerpApi.' }));
   }
-}).listen(Number(process.env.PORT) || 3001, isProduction ? '0.0.0.0' : '127.0.0.1', () => {
-  console.log(`Search server running on port ${Number(process.env.PORT) || 3001}`);
-});
+  };
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  createServer(createSearchHandler()).listen(Number(process.env.PORT) || 3001, isProduction ? '0.0.0.0' : '127.0.0.1', () => {
+    console.log(`Search server running on port ${Number(process.env.PORT) || 3001}`);
+  });
+}
